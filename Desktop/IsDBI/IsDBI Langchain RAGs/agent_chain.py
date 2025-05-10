@@ -1,0 +1,353 @@
+from langchain.chains import LLMChain, SequentialChain
+from langchain.prompts import PromptTemplate
+from rich.console import Console
+from rich.panel import Panel
+from rich import box
+
+class AAOIFIAgentChain:
+    """Class to manage the AAOIFI agent chains with RAG capabilities"""
+    
+    def __init__(self, llm, retriever=None):
+        """
+        Initialize with an LLM and optional retriever
+        
+        Args:
+            llm: The language model to use
+            retriever: Document retriever for RAG functionality
+        """
+        self.llm = llm
+        self.retriever = retriever
+        self.console = Console()
+        self.review_chain = None
+        self.enhancement_chain = None
+        self.validation_chain = None
+        self.multi_agent_chain = None
+        self.custom_qa_chain = None  # New chain for challenge_1
+        self._setup_chains()
+        
+    def _setup_chains(self):
+        """Set up all the necessary chains"""
+        # Define prompts with RAG integration
+        review_prompt = PromptTemplate(
+            input_variables=["input_text", "retrieved_context"],
+            template="""
+You are a specialized agent for reviewing AAOIFI (Accounting and Auditing Organization for Islamic Financial Institutions) standards.
+            
+Your task is to carefully analyze the provided standard text and extract key elements including:
+1. Main principles and requirements
+2. Key definitions and concepts
+3. Compliance requirements
+4. Areas that might need clarification or enhancement
+5. Current limitations or ambiguities
+6. The specific Islamic finance principles and Shariah considerations involved
+
+Please organize your analysis in a structured format focusing on these key elements.
+
+Here is relevant contextual information from our knowledge base that may help your analysis:
+{retrieved_context}
+
+Standard text to analyze:
+{input_text}
+"""
+        )
+
+        enhancement_prompt = PromptTemplate(
+            input_variables=["summary", "retrieved_context"],
+            template="""
+You are a specialized agent for proposing AI-driven enhancements to AAOIFI standards.
+            
+Based on the analysis of the standard provided and current trends in Islamic finance, propose specific modifications or enhancements that would:
+1. Improve clarity and reduce ambiguity
+2. Enhance practical applicability
+3. Address any identified gaps or limitations
+4. Incorporate modern financial practices while maintaining Shariah compliance
+5. Improve standardization and consistency
+
+For each proposed enhancement, explain:
+- The specific section or concept being enhanced
+- The proposed modification
+- The rationale behind the enhancement
+- The expected impact on standard implementation
+- How it aligns with Shariah principles
+
+Here is relevant contextual information from our knowledge base that may help inform your enhancement suggestions:
+{retrieved_context}
+
+Standard analysis:
+{summary}
+"""
+        )
+
+        validation_prompt = PromptTemplate(
+            input_variables=["input_text", "suggestion", "retrieved_context"],
+            template="""
+You are a specialized agent for validating proposed enhancements to AAOIFI standards.
+            
+Your task is to rigorously evaluate the proposed enhancements based on:
+1. Compliance with Shariah principles and Islamic finance fundamentals
+2. Consistency with the original intent and purpose of the standard
+3. Practical applicability in Islamic financial institutions
+4. Potential impacts on transparency, governance, and stakeholder interests
+5. Technical accuracy and clarity
+
+For each proposed enhancement:
+- Determine if it aligns with core Islamic finance principles (e.g., prohibition of riba, gharar, and maysir)
+- Evaluate if it maintains or improves the standard's effectiveness
+- Identify any potential unintended consequences
+- Provide a final recommendation: Approve, Approve with modifications, or Reject
+- For any modifications or rejections, provide clear reasoning based on Shariah principles
+
+Here is relevant contextual information from our knowledge base that may help in your validation:
+{retrieved_context}
+
+Original standard information:
+{input_text}
+
+Proposed enhancements:
+{suggestion}
+"""
+        )
+        
+        # New prompt for challenge_1 - Direct Q&A
+        qa_prompt = PromptTemplate(
+            input_variables=["context", "question", "retrieved_context"],
+            template="""
+You are an expert in Islamic finance and AAOIFI standards. A user has asked a question related to 
+Islamic finance or AAOIFI standards. Please provide a detailed, accurate, and helpful response based 
+on the provided context and your knowledge of Islamic finance principles.
+
+Here is the context provided by the user:
+{context}
+
+Here is relevant contextual information from our knowledge base that may help:
+{retrieved_context}
+
+User's question:
+{question}
+
+Please provide a comprehensive and accurate answer to the question based on the context provided.
+"""
+        )
+
+        # Define LLMChains
+        self.review_chain = LLMChain(llm=self.llm, prompt=review_prompt, output_key="summary")
+        self.enhancement_chain = LLMChain(llm=self.llm, prompt=enhancement_prompt, output_key="suggestion")
+        self.validation_chain = LLMChain(llm=self.llm, prompt=validation_prompt, output_key="validation")
+        self.custom_qa_chain = LLMChain(llm=self.llm, prompt=qa_prompt, output_key="answer")  # New chain for challenge_1
+
+        # Define Sequential Chain
+        self.multi_agent_chain = SequentialChain(
+            chains=[self.review_chain, self.enhancement_chain, self.validation_chain],
+            input_variables=["input_text", "retrieved_context"],
+            output_variables=["summary", "suggestion", "validation"],
+            verbose=False
+        )
+        
+    def _retrieve_relevant_documents(self, query, max_docs=3):
+        """
+        Retrieve relevant documents based on query
+        
+        Args:
+            query: The query to search for
+            max_docs: Maximum number of documents to retrieve
+            
+        Returns:
+            String containing relevant context or message if retriever not available
+        """
+        if not self.retriever:
+            return "No document retriever available. Proceeding without additional context."
+            
+        try:
+            docs = self.retriever.get_relevant_documents(query, k=max_docs)
+            if not docs:
+                return "No relevant documents found in knowledge base."
+                
+            context_parts = []
+            for i, doc in enumerate(docs):
+                source = doc.metadata.get("source", "Unknown source")
+                page = doc.metadata.get("page", "Unknown page")
+                context_parts.append(f"Document {i+1} (Source: {source}, Page: {page}):\n{doc.page_content}\n")
+                
+            return "\n".join(context_parts)
+        except Exception as e:
+            self.console.print(f"[bold red]Error retrieving documents: {str(e)}")
+            return "Error retrieving documents from knowledge base."
+    
+    def _retrieve_top_fas_rules(self, query, max_docs=3):
+        """
+        Retrieve top FAS rules with similarity percentages
+        
+        Args:
+            query: The query to search for
+            max_docs: Maximum number of documents to retrieve
+            
+        Returns:
+            List of tuples with (document, score) or empty list if retriever not available
+        """
+        if not self.retriever or not hasattr(self.retriever, 'vectorstore'):
+            return []
+            
+        try:
+            # Use similarity search with scores if available
+            if hasattr(self.retriever.vectorstore, 'similarity_search_with_score'):
+                docs_and_scores = self.retriever.vectorstore.similarity_search_with_score(query, k=max_docs)
+                return docs_and_scores
+            else:
+                # Fallback if similarity_search_with_score is not available
+                docs = self.retriever.get_relevant_documents(query, k=max_docs)
+                # Return docs with a placeholder score since actual scores aren't available
+                return [(doc, 0.0) for doc in docs]
+        except Exception as e:
+            self.console.print(f"[bold red]Error retrieving FAS rules: {str(e)}")
+            return []
+            
+    def process_standard(self, input_text):
+        """
+        Process a standard through the multi-agent chain with RAG integration
+        
+        Args:
+            input_text: The standard text to analyze
+            
+        Returns:
+            Dictionary with results from each step
+        """
+        self.console.print("[bold]Processing standard through agent chain with RAG integration...")
+        
+        # Create a shorter version for retrieval query
+        query_text = input_text[:1000] if len(input_text) > 1000 else input_text
+        
+        # Step 1: Review
+        self.console.print("[bold cyan]Step 1: Retrieving context for review phase...")
+        review_context = self._retrieve_relevant_documents(query_text)
+        self.console.print("[bold cyan]Running review analysis...")
+        summary = self.review_chain.invoke({"input_text": input_text, "retrieved_context": review_context})["summary"]
+        
+        # Step 2: Enhancement
+        self.console.print("[bold cyan]Step 2: Retrieving context for enhancement phase...")
+        enhancement_context = self._retrieve_relevant_documents(summary)
+        self.console.print("[bold cyan]Generating enhancement suggestions...")
+        suggestion = self.enhancement_chain.invoke({"summary": summary, "retrieved_context": enhancement_context})["suggestion"]
+        
+        # Step 3: Validation
+        self.console.print("[bold cyan]Step 3: Retrieving context for validation phase...")
+        validation_context = self._retrieve_relevant_documents(suggestion)
+        self.console.print("[bold cyan]Validating enhancement suggestions...")
+        validation = self.validation_chain.invoke({
+            "input_text": input_text, 
+            "suggestion": suggestion, 
+            "retrieved_context": validation_context
+        })["validation"]
+        
+        # Combine results
+        output = {
+            "summary": summary,
+            "suggestion": suggestion,
+            "validation": validation
+        }
+        
+        return output
+    
+    # New method for challenge_1
+    def answer_question(self, context, question):
+        """
+        Answer a question based on context through the custom QA chain
+        
+        Args:
+            context: The context provided by the user
+            question: The question to answer
+            
+        Returns:
+            Dictionary with answer
+        """
+        self.console.print("[bold]Processing question through QA chain with RAG integration...")
+        
+        # Create a query combining context and question for better retrieval
+        query_text = f"{context} {question}"
+        if len(query_text) > 1000:
+            query_text = query_text[:1000]
+        
+        # Retrieve relevant context
+        self.console.print("[bold cyan]Retrieving context for question...")
+        retrieved_context = self._retrieve_relevant_documents(query_text)
+        
+        # Process through QA chain
+        self.console.print("[bold cyan]Generating answer...")
+        answer = self.custom_qa_chain.invoke({
+            "context": context,
+            "question": question,
+            "retrieved_context": retrieved_context
+        })["answer"]
+        
+        # Return result
+        return {"answer": answer}
+    
+    # New method for challenge_2
+    def find_relevant_fas_rules(self, context, question):
+        """
+        Find top 3 relevant FAS rules with similarity percentages
+        
+        Args:
+            context: The context provided by the user
+            question: The question to answer
+            
+        Returns:
+            Dictionary with results including top rules and percentages
+        """
+        self.console.print("[bold]Finding relevant FAS rules with percentages...")
+        
+        # Create a query combining context and question for better retrieval
+        query_text = f"{context} {question}"
+        if len(query_text) > 1000:
+            query_text = query_text[:1000]
+        
+        # Retrieve top FAS rules with scores
+        docs_and_scores = self._retrieve_top_fas_rules(query_text, max_docs=3)
+        
+        if not docs_and_scores:
+            return {
+                "message": "No relevant FAS rules found or retriever not available.",
+                "rules": []
+            }
+        
+        # Process results
+        rules = []
+        # Find max score for normalization if needed
+        max_score = max([score for _, score in docs_and_scores]) if docs_and_scores else 1.0
+        
+        for doc, score in docs_and_scores:
+            # Normalize score to percentage (assuming higher score is better)
+            # Convert to percentage and invert if needed (depends on the scoring system)
+            # Some similarity scores are distance-based (lower is better), some are cosine (higher is better)
+            # Adjust this calculation based on your specific embedding model
+            percentage = (score / max_score) * 100
+            
+            rules.append({
+                "source": doc.metadata.get("source", "Unknown source"),
+                "page": doc.metadata.get("page", "Unknown page"),
+                "content_snippet": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
+                "relevance_percentage": round(percentage, 2)
+            })
+        
+        # Return results
+        return {
+            "message": f"Found {len(rules)} relevant FAS rules.",
+            "rules": rules
+        }
+        
+    def display_results(self, output):
+        """Display the results using rich formatting"""
+        self.console.rule("[bold green]Step 1: Review Output")
+        self.console.print(Panel(output['summary'], title="🧠 Extracted Summary", style="white", box=box.ROUNDED))
+
+        self.console.rule("[bold yellow]Step 2: Enhancement Suggestion")
+        self.console.print(Panel(output['suggestion'], title="🛠️ Suggested Enhancement", style="white", box=box.ROUNDED))
+
+        self.console.rule("[bold blue]Step 3: Validation Result")
+        self.console.print(Panel(output['validation'], title="✅ Validation", style="white", box=box.ROUNDED))
+        
+        return output
+        
+    def set_retriever(self, retriever):
+        """Set or update the document retriever"""
+        self.retriever = retriever
+        self.console.print("[bold green]Document retriever updated successfully")
